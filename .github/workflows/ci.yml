@@ -1,0 +1,68 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: feedwatch
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      FEEDWATCH_TEST_DSN: postgresql://postgres@localhost:5432/feedwatch
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install -e ".[postgres,dev]"
+      - run: ruff check .
+      - run: ruff format --check .
+      - run: mypy feedwatch
+      - run: pytest -q
+
+  demo:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start the compose demo
+        run: docker compose up --build --detach --wait
+      - name: Push-feed watcher is connected and writing to PostgreSQL
+        run: |
+          for i in $(seq 1 45); do
+            if curl -fs localhost:8080/status | python3 -c "import json, sys; s = json.load(sys.stdin); sys.exit(0 if s['connected'] and s['sink']['written'] > 0 else 1)"; then
+              curl -fs localhost:8080/status | python3 -m json.tool
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "watcher never reported connected + rows written"
+          exit 1
+      - name: Polling watcher is polling
+        run: |
+          for i in $(seq 1 15); do
+            curl -fs localhost:8081/metrics | grep -E '^feedwatch_events_total\{event="polls"\}' && exit 0
+            sleep 2
+          done
+          exit 1
+      - name: Logs
+        if: always()
+        run: docker compose logs --no-color | tail -80
+      - name: Stop
+        if: always()
+        run: docker compose down --volumes
