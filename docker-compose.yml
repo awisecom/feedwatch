@@ -1,0 +1,41 @@
+# Local demo: an upstream with faults switched on, a push-feed watcher writing
+# to PostgreSQL, and a polling watcher next to it for comparison.
+#
+#   docker compose up --build
+#   push feed: http://localhost:8080    polling: http://localhost:8081
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: feedwatch
+      POSTGRES_HOST_AUTH_METHOD: trust # demo only: the port is not published outside this network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d feedwatch"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  upstream:
+    build: .
+    image: feedwatch:local
+    command: ["sim", "--host", "0.0.0.0", "--drop", "0.01", "--disconnect-every", "90", "--stall", "DELTA:60:25"]
+
+  stream:
+    build: .
+    image: feedwatch:local
+    command: ["run", "--upstream", "http://upstream:8765", "--host", "0.0.0.0", "--dsn", "postgresql://postgres@db:5432/feedwatch"]
+    ports: ["8080:8080"]
+    depends_on:
+      db:
+        condition: service_healthy
+      upstream:
+        condition: service_started
+
+  poll:
+    build: .
+    image: feedwatch:local
+    command: ["run", "--upstream", "http://upstream:8765", "--host", "0.0.0.0", "--mode", "poll"]
+    ports: ["8081:8080"]
+    depends_on:
+      upstream:
+        condition: service_started
